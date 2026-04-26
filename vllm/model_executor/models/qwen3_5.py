@@ -448,6 +448,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -463,6 +464,19 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+
+    # Qwen3.5 text decoder layers inherit from Qwen3Next decoders, so the hybrid
+    # SSM+attention state shape/dtype calculations are identical. Delegate to
+    # Qwen3NextForCausalLM rather than duplicate the logic.
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config):
+        from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
+        return Qwen3NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config):
+        from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM
+        return Qwen3NextForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
