@@ -121,6 +121,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
+        # Post-spec state recovery (spec_decode_src_indices) exists because in
+        # the default mamba_cache_mode="none" nothing realigns SSM/conv state
+        # after draft acceptance -- the next non-spec step would read block 0
+        # while live state sits at column num_accepted-1. In "align" mode the
+        # runner's postprocess_mamba_align_gpu already copies accepted state
+        # into place after every spec step, so recovering here again would
+        # copy a stale column OVER the realigned state. "all" mode records
+        # write anchors but performs no copies -- recovery still applies.
+        self.use_post_spec_state_recovery: bool = (
+            self.use_spec_decode
+            and vllm_config.cache_config.mamba_cache_mode != "align"
+        )
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph: bool = (
@@ -276,7 +288,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc_cpu = query_start_loc_cpu
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
             if (
-                self.use_spec_decode
+                self.use_post_spec_state_recovery
                 and num_accepted_tokens is not None
                 and num_decodes > 0
             ):
@@ -412,7 +424,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_mask_cpu = ~spec_sequence_masks_cpu
                 non_spec_num_accepted = num_accepted_tokens[non_spec_mask_cpu]
                 if (
-                    self.use_spec_decode
+                    self.use_post_spec_state_recovery
                     and non_spec_num_accepted.numel() > 0
                     and (non_spec_num_accepted > 1).any()
                 ):
