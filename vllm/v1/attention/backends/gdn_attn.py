@@ -158,6 +158,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+        # Persistent source-index buffer for post-spec state recovery under
+        # FULL cudagraph replay: the recovery copy inside the captured decode
+        # graph reads this buffer, so the builder must refresh it in place
+        # every step (a fresh per-build tensor would leave the graph reading
+        # stale capture-time memory).
+        self.spec_decode_src_indices_buf: torch.Tensor = torch.empty(
+            (self.decode_cudagraph_max_bs,),
+            dtype=torch.int32,
+            device=device,
+        )
         self.spec_sequence_masks: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.bool,
@@ -574,6 +584,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
+
+            if spec_decode_src_indices is not None:
+                # Recovery runs inside the captured graph: stage the source
+                # indices and acceptance counts in persistent buffers. Padded
+                # rows self-copy the NULL block / take offset 0, both no-ops.
+                self.spec_decode_src_indices_buf[:num_decodes].copy_(
+                    spec_decode_src_indices, non_blocking=True
+                )
+                spec_decode_src_indices = self.spec_decode_src_indices_buf[
+                    :batch_size
+                ]
+                spec_decode_src_indices[num_decodes:].fill_(NULL_BLOCK_ID)
+
+                assert num_accepted_tokens is not None
+                self.num_accepted_tokens[:num_decodes].copy_(
+                    num_accepted_tokens, non_blocking=True
+                )
+                num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+                num_accepted_tokens[num_decodes:].fill_(1)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
